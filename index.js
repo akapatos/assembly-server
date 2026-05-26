@@ -47,6 +47,36 @@ function probeMediaDuration(filePath) {
   });
 }
 
+/** Strip any audio from stock footage so mux only uses the voiceover track. */
+function stripStockAudio(stockPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg(stockPath)
+      .outputOptions(["-c:v", "copy", "-an", "-movflags", "+faststart"])
+      .output(outputPath)
+      .on("end", () => resolve())
+      .on("error", (copyErr) => {
+        console.warn("[assembly-server] Stream-copy strip audio failed, re-encoding", {
+          message: copyErr.message,
+        });
+        ffmpeg(stockPath)
+          .outputOptions([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-an",
+            "-movflags",
+            "+faststart",
+          ])
+          .output(outputPath)
+          .on("end", () => resolve())
+          .on("error", (err) => reject(err))
+          .run();
+      })
+      .run();
+  });
+}
+
 async function downloadToFile(url, destPath, label) {
   console.log("[assembly-server] Downloading", { label, url: url?.slice(0, 120) });
 
@@ -96,7 +126,6 @@ function runFfmpegSceneMux(
 
     command
       .input(voicePath)
-      .duration(targetDuration)
       .videoFilters(
         "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black",
       )
@@ -117,6 +146,8 @@ function runFfmpegSceneMux(
         "44100",
         "-ac",
         "2",
+        "-t",
+        String(targetDuration),
         "-shortest",
         "-movflags",
         "+faststart",
@@ -131,7 +162,6 @@ function runFfmpegSceneMux(
 async function buildSceneSegment(clip, index, workDir) {
   const targetDuration = Math.max(0.1, getClipDuration(clip));
   const trimStart = Math.max(0, Number(clip.trim_start ?? 0));
-  const stockPath = path.join(workDir, `scene_${index}_stock.mp4`);
   const voicePath = path.join(workDir, `scene_${index}_voice.mp3`);
   const outputPath = path.join(workDir, `scene_${index}.mp4`);
 
@@ -142,13 +172,17 @@ async function buildSceneSegment(clip, index, workDir) {
     throw new Error(`Clip ${index} is missing voice_url`);
   }
 
-  await downloadToFile(clip.file_url, stockPath, `stock-${index}`);
+  const stockRawPath = path.join(workDir, `scene_${index}_stock_raw.mp4`);
+  const stockNoAudioPath = path.join(workDir, `scene_${index}_stock_noaudio.mp4`);
+
+  await downloadToFile(clip.file_url, stockRawPath, `stock-${index}`);
+  await stripStockAudio(stockRawPath, stockNoAudioPath);
   await downloadToFile(clip.voice_url, voicePath, `voice-${index}`);
 
-  const sourceDuration = await probeMediaDuration(stockPath);
+  const sourceDuration = await probeMediaDuration(stockNoAudioPath);
 
   await runFfmpegSceneMux(
-    stockPath,
+    stockNoAudioPath,
     voicePath,
     outputPath,
     targetDuration,
