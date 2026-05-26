@@ -30,6 +30,13 @@ function getClipDuration(clip) {
   );
 }
 
+/** Log exact FFmpeg CLI and stderr for Railway debugging. */
+function attachFfmpegLogging(command) {
+  return command
+    .on("start", (cmd) => console.log("[ffmpeg-cmd]", cmd))
+    .on("stderr", (line) => console.log("[ffmpeg-stderr]", line));
+}
+
 function probeMediaDuration(filePath) {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(filePath, (err, metadata) => {
@@ -50,25 +57,29 @@ function probeMediaDuration(filePath) {
 /** Strip any audio from stock footage so mux only uses the voiceover track. */
 function stripStockAudio(stockPath, outputPath) {
   return new Promise((resolve, reject) => {
-    ffmpeg(stockPath)
-      .outputOptions(["-c:v", "copy", "-an", "-movflags", "+faststart"])
-      .output(outputPath)
+    attachFfmpegLogging(
+      ffmpeg(stockPath)
+        .outputOptions(["-c:v", "copy", "-an", "-movflags", "+faststart"])
+        .output(outputPath),
+    )
       .on("end", () => resolve())
       .on("error", (copyErr) => {
         console.warn("[assembly-server] Stream-copy strip audio failed, re-encoding", {
           message: copyErr.message,
         });
-        ffmpeg(stockPath)
-          .outputOptions([
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-an",
-            "-movflags",
-            "+faststart",
-          ])
-          .output(outputPath)
+        attachFfmpegLogging(
+          ffmpeg(stockPath)
+            .outputOptions([
+              "-c:v",
+              "libx264",
+              "-preset",
+              "fast",
+              "-an",
+              "-movflags",
+              "+faststart",
+            ])
+            .output(outputPath),
+        )
           .on("end", () => resolve())
           .on("error", (err) => reject(err))
           .run();
@@ -124,35 +135,37 @@ function runFfmpegSceneMux(
       command = command.input(stockPath).inputOptions(inputOptions);
     }
 
-    command
-      .input(voicePath)
-      .videoFilters(
-        "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black",
-      )
-      .outputOptions([
-        "-map",
-        "0:v:0",
-        "-map",
-        "1:a:0",
-        "-c:v",
-        "libx264",
-        "-crf",
-        "28",
-        "-preset",
-        "fast",
-        "-c:a",
-        "aac",
-        "-ar",
-        "44100",
-        "-ac",
-        "2",
-        "-t",
-        String(targetDuration),
-        "-shortest",
-        "-movflags",
-        "+faststart",
-      ])
-      .output(outputPath)
+    attachFfmpegLogging(
+      command
+        .input(voicePath)
+        .videoFilters(
+          "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black",
+        )
+        .outputOptions([
+          "-map",
+          "0:v:0",
+          "-map",
+          "1:a:0",
+          "-c:v",
+          "libx264",
+          "-crf",
+          "28",
+          "-preset",
+          "fast",
+          "-c:a",
+          "aac",
+          "-ar",
+          "44100",
+          "-ac",
+          "2",
+          "-t",
+          String(targetDuration),
+          "-shortest",
+          "-movflags",
+          "+faststart",
+        ])
+        .output(outputPath),
+    )
       .on("end", () => resolve())
       .on("error", (err) => reject(err))
       .run();
@@ -238,8 +251,7 @@ function runFfmpegConcatDemuxer(segmentPaths, outputPath) {
             command.outputOptions(["-c", "copy"]);
           }
 
-          command
-            .output(outputPath)
+          attachFfmpegLogging(command.output(outputPath))
             .on("end", () => res())
             .on("error", (err) => rej(err))
             .run();
