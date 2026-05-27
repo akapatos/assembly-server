@@ -54,6 +54,41 @@ function probeMediaDuration(filePath) {
   });
 }
 
+/**
+ * Normalise stock video to 1080p, 30 fps CFR, yuv420p, no audio — before trimming/mux with voiceover.
+ */
+function normalizeStockVideoForMux(srcPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    attachFfmpegLogging(
+      ffmpeg(srcPath)
+        .videoFilters(
+          "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p",
+        )
+        .outputOptions([
+          "-c:v",
+          "libx264",
+          "-preset",
+          "fast",
+          "-crf",
+          "28",
+          "-pix_fmt",
+          "yuv420p",
+          "-r",
+          "30",
+          "-vsync",
+          "cfr",
+          "-an",
+          "-movflags",
+          "+faststart",
+        ])
+        .output(outputPath),
+    )
+      .on("end", () => resolve())
+      .on("error", (err) => reject(err))
+      .run();
+  });
+}
+
 /** Strip any audio from stock footage so mux only uses the voiceover track. */
 function stripStockAudio(stockPath, outputPath) {
   return new Promise((resolve, reject) => {
@@ -139,7 +174,7 @@ function runFfmpegSceneMux(
       command
         .input(voicePath)
         .videoFilters(
-          "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black",
+          "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p",
         )
         .outputOptions([
           "-map",
@@ -152,6 +187,12 @@ function runFfmpegSceneMux(
           "28",
           "-preset",
           "fast",
+          "-pix_fmt",
+          "yuv420p",
+          "-r",
+          "30",
+          "-vsync",
+          "cfr",
           "-c:a",
           "aac",
           "-ar",
@@ -187,15 +228,17 @@ async function buildSceneSegment(clip, index, workDir) {
 
   const stockRawPath = path.join(workDir, `scene_${index}_stock_raw.mp4`);
   const stockNoAudioPath = path.join(workDir, `scene_${index}_stock_noaudio.mp4`);
+  const stockNormalizedPath = path.join(workDir, `scene_${index}_stock_normalized.mp4`);
 
   await downloadToFile(clip.file_url, stockRawPath, `stock-${index}`);
   await stripStockAudio(stockRawPath, stockNoAudioPath);
+  await normalizeStockVideoForMux(stockNoAudioPath, stockNormalizedPath);
   await downloadToFile(clip.voice_url, voicePath, `voice-${index}`);
 
-  const sourceDuration = await probeMediaDuration(stockNoAudioPath);
+  const sourceDuration = await probeMediaDuration(stockNormalizedPath);
 
   await runFfmpegSceneMux(
-    stockNoAudioPath,
+    stockNormalizedPath,
     voicePath,
     outputPath,
     targetDuration,
