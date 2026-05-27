@@ -4,4 +4,4 @@ buildCommand = "npm install"
 
 [deploy]
 startCommand = "node index.js"
-restartPolicyType = "on-failure"
+restartPolicyType = "ON_FAILURE"
