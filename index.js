@@ -54,6 +54,178 @@ function probeMediaDuration(filePath) {
   });
 }
 
+function getMusicQueryForNiche(niche) {
+  const value = String(niche || "").toLowerCase();
+  if (/history|true crime|crime|murder|detective|investigation/.test(value)) {
+    return "cinematic dramatic dark";
+  }
+  if (/space|science|cosmos|physics|nasa|astronomy/.test(value)) {
+    return "cinematic epic space";
+  }
+  if (/technology|tech|software|ai|digital|internet/.test(value)) {
+    return "modern corporate upbeat";
+  }
+  if (/finance|market|stock|business|economy|money/.test(value)) {
+    return "corporate professional";
+  }
+  return "cinematic documentary";
+}
+
+function getClipCaptionDuration(clip) {
+  const trimStart = Number(clip?.trim_start ?? 0);
+  const trimEnd = Number(clip?.trim_end ?? 0);
+  const byTrim = trimEnd - trimStart;
+  if (Number.isFinite(byTrim) && byTrim > 0) {
+    return byTrim;
+  }
+  return getClipDuration(clip);
+}
+
+function escapeDrawtextText(input) {
+  return String(input || "")
+    .replace(/\\/g, "\\\\")
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "\\'")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]")
+    .replace(/%/g, "\\%")
+    .replace(/,/g, "\\,")
+    .replace(/\n/g, " ");
+}
+
+function buildCaptionDrawtextFilters(clips) {
+  let cursor = 0;
+  return clips
+    .map((clip) => {
+      const narration = String(clip?.narration || "").trim();
+      if (!narration) {
+        cursor += getClipCaptionDuration(clip);
+        return null;
+      }
+      const start = cursor;
+      const duration = Math.max(0.1, getClipCaptionDuration(clip));
+      const end = start + duration;
+      cursor = end;
+      const text = escapeDrawtextText(narration);
+      return (
+        "drawtext=" +
+        `text='${text}':` +
+        "font=DejaVuSans-Bold:" +
+        "fontcolor=white:" +
+        "fontsize=52:" +
+        "borderw=4:" +
+        "bordercolor=black:" +
+        "x=(w-text_w)/2:" +
+        "y=h-(text_h*2):" +
+        `enable='between(t,${start.toFixed(3)},${end.toFixed(3)})'`
+      );
+    })
+    .filter(Boolean);
+}
+
+async function searchPixabayMusicTrack(query, pixabayApiKey) {
+  const url = new URL("https://pixabay.com/api/audio/");
+  url.searchParams.set("key", pixabayApiKey);
+  url.searchParams.set("q", query);
+  url.searchParams.set("per_page", "10");
+
+  console.log("[assembly-server] Searching Pixabay music", { query });
+  const response = await fetch(url.toString());
+  if (!response.ok) {
+    throw new Error(
+      `Pixabay music search failed: HTTP ${response.status} ${response.statusText}`,
+    );
+  }
+
+  const data = await response.json();
+  const hits = Array.isArray(data?.hits) ? data.hits : [];
+  const first = hits.find((hit) => hit?.audio || hit?.url);
+  if (!first) {
+    return null;
+  }
+
+  const audioUrl =
+    first.audio ??
+    first.url ??
+    first.previewURL ??
+    first?.audio_url ??
+    null;
+  if (!audioUrl) {
+    return null;
+  }
+  return { audioUrl, track: first };
+}
+
+function mixBackgroundMusic(inputVideoPath, musicPath, outputPath, finalDuration) {
+  return new Promise((resolve, reject) => {
+    const fadeOutStart = Math.max(0, finalDuration - 4);
+    attachFfmpegLogging(
+      ffmpeg()
+        .input(inputVideoPath)
+        .input(musicPath)
+        .inputOptions(["-stream_loop", "-1"])
+        .complexFilter([
+          `[1:a]volume=-18dB,afade=t=in:st=0:d=3,afade=t=out:st=${fadeOutStart}:d=4[a_bg]`,
+          "[0:a][a_bg]amix=inputs=2:duration=first:dropout_transition=3[a_mix]",
+        ])
+        .outputOptions([
+          "-map",
+          "0:v:0",
+          "-map",
+          "[a_mix]",
+          "-c:v",
+          "copy",
+          "-c:a",
+          "aac",
+          "-ar",
+          "44100",
+          "-ac",
+          "2",
+          "-t",
+          String(finalDuration),
+          "-shortest",
+          "-movflags",
+          "+faststart",
+        ])
+        .output(outputPath),
+    )
+      .on("end", () => resolve())
+      .on("error", (err) => reject(err))
+      .run();
+  });
+}
+
+function burnCaptions(inputVideoPath, outputPath, clips) {
+  const drawtextFilters = buildCaptionDrawtextFilters(clips);
+  if (!drawtextFilters.length) {
+    return fs.copyFile(inputVideoPath, outputPath);
+  }
+  return new Promise((resolve, reject) => {
+    attachFfmpegLogging(
+      ffmpeg(inputVideoPath)
+        .videoFilters(drawtextFilters.join(","))
+        .outputOptions([
+          "-c:v",
+          "libx264",
+          "-preset",
+          "fast",
+          "-crf",
+          "22",
+          "-pix_fmt",
+          "yuv420p",
+          "-c:a",
+          "copy",
+          "-movflags",
+          "+faststart",
+        ])
+        .output(outputPath),
+    )
+      .on("end", () => resolve())
+      .on("error", (err) => reject(err))
+      .run();
+  });
+}
+
 /**
  * Normalise stock video to 1080p, 30 fps CFR, yuv420p, no audio — before trimming/mux with voiceover.
  */
@@ -348,7 +520,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.post("/assemble", async (req, res) => {
-  const { clips, videoId, cloudinaryConfig } = req.body ?? {};
+  const { clips, videoId, niche, cloudinaryConfig } = req.body ?? {};
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "autopilot-assembly-"));
 
   console.log("[assembly-server] POST /assemble", {
@@ -385,9 +557,49 @@ app.post("/assemble", async (req, res) => {
     await runFfmpegConcatDemuxer(segmentPaths, finalPath);
 
     const finalDuration = await probeMediaDuration(finalPath);
+
+    let processedPath = finalPath;
+    const pixabayApiKey = cloudinaryConfig?.pixabayApiKey || process.env.PIXABAY_API_KEY;
+    if (pixabayApiKey) {
+      try {
+        const musicQuery = getMusicQueryForNiche(niche);
+        const music = await searchPixabayMusicTrack(musicQuery, pixabayApiKey);
+        if (music?.audioUrl) {
+          const musicPath = path.join(workDir, "bg-music.mp3");
+          const withMusicPath = path.join(workDir, "final-with-music.mp4");
+          await downloadToFile(music.audioUrl, musicPath, "bg-music");
+          await mixBackgroundMusic(finalPath, musicPath, withMusicPath, finalDuration);
+          processedPath = withMusicPath;
+          console.log("[assembly-server] Background music mixed", {
+            videoId,
+            musicQuery,
+            audioUrl: music.audioUrl?.slice?.(0, 120),
+          });
+        } else {
+          console.warn("[assembly-server] No Pixabay music results, continuing without music", {
+            videoId,
+            niche,
+            musicQuery,
+          });
+        }
+      } catch (musicError) {
+        console.warn("[assembly-server] Music mix failed, continuing without music", {
+          videoId,
+          niche,
+          message: musicError instanceof Error ? musicError.message : String(musicError),
+        });
+      }
+    } else {
+      console.warn("[assembly-server] No pixabayApiKey provided, skipping background music");
+    }
+
+    const withCaptionsPath = path.join(workDir, "final-with-captions.mp4");
+    await burnCaptions(processedPath, withCaptionsPath, clips);
+    processedPath = withCaptionsPath;
+
     console.log("[assembly-server] Uploading final video", { videoId, finalDuration });
 
-    const upload = await uploadFinalVideo(finalPath, videoId);
+    const upload = await uploadFinalVideo(processedPath, videoId);
 
     res.json({
       file_url: upload.secure_url,
