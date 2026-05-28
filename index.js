@@ -81,6 +81,45 @@ function getClipCaptionDuration(clip) {
   return getClipDuration(clip);
 }
 
+function truncateAtWordBoundary(text, maxChars) {
+  const input = String(text || "").trim();
+  if (input.length <= maxChars) {
+    return input;
+  }
+  const slice = input.slice(0, maxChars + 1);
+  const lastSpace = slice.lastIndexOf(" ");
+  if (lastSpace > 0) {
+    return slice.slice(0, lastSpace).trim();
+  }
+  return input.slice(0, maxChars).trim();
+}
+
+function splitIntoTwoCaptionLines(text) {
+  const words = String(text || "").split(/\s+/).filter(Boolean);
+  if (words.length < 2) {
+    return text;
+  }
+  const mid = Math.ceil(words.length / 2);
+  const line1 = words.slice(0, mid).join(" ").trim();
+  const line2 = words.slice(mid).join(" ").trim();
+  if (!line1 || !line2) {
+    return text;
+  }
+  return `${line1}\n${line2}`;
+}
+
+function formatCaptionText(narration) {
+  const normalized = String(narration || "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.length <= 100) {
+    return normalized;
+  }
+  const truncated = truncateAtWordBoundary(normalized, 100);
+  return splitIntoTwoCaptionLines(truncated);
+}
+
 function escapeDrawtextText(input) {
   return String(input || "")
     .replace(/\\/g, "\\\\")
@@ -90,7 +129,7 @@ function escapeDrawtextText(input) {
     .replace(/\]/g, "\\]")
     .replace(/%/g, "\\%")
     .replace(/,/g, "\\,")
-    .replace(/\n/g, " ");
+    .replace(/\n/g, "\\n");
 }
 
 function buildCaptionDrawtextFilters(clips) {
@@ -106,7 +145,7 @@ function buildCaptionDrawtextFilters(clips) {
       const duration = Math.max(0.1, getClipCaptionDuration(clip));
       const end = start + duration;
       cursor = end;
-      const text = escapeDrawtextText(narration);
+      const text = escapeDrawtextText(formatCaptionText(narration));
       return (
         "drawtext=" +
         `text='${text}':` +
@@ -594,8 +633,16 @@ app.post("/assemble", async (req, res) => {
     }
 
     const withCaptionsPath = path.join(workDir, "final-with-captions.mp4");
-    await burnCaptions(processedPath, withCaptionsPath, clips);
-    processedPath = withCaptionsPath;
+    try {
+      await burnCaptions(processedPath, withCaptionsPath, clips);
+      processedPath = withCaptionsPath;
+    } catch (captionError) {
+      console.warn("[assembly-server] Caption burn failed, continuing without captions", {
+        videoId,
+        message:
+          captionError instanceof Error ? captionError.message : String(captionError),
+      });
+    }
 
     console.log("[assembly-server] Uploading final video", { videoId, finalDuration });
 
