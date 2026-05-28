@@ -168,8 +168,13 @@ async function searchPixabayMusicTrack(query, pixabayApiKey) {
   url.searchParams.set("q", query);
   url.searchParams.set("per_page", "10");
 
-  console.log("[assembly-server] Searching Pixabay music", { query });
   const response = await fetch(url.toString());
+  console.log("[music] Pixabay search response", {
+    query,
+    status: response.status,
+    statusText: response.statusText,
+    ok: response.ok,
+  });
   if (!response.ok) {
     throw new Error(
       `Pixabay music search failed: HTTP ${response.status} ${response.statusText}`,
@@ -178,8 +183,13 @@ async function searchPixabayMusicTrack(query, pixabayApiKey) {
 
   const data = await response.json();
   const hits = Array.isArray(data?.hits) ? data.hits : [];
+  console.log("[music] Pixabay results", {
+    query,
+    resultCount: hits.length,
+  });
   const first = hits.find((hit) => hit?.audio || hit?.url);
   if (!first) {
+    console.log("[music] No results found");
     return null;
   }
 
@@ -190,6 +200,9 @@ async function searchPixabayMusicTrack(query, pixabayApiKey) {
     first?.audio_url ??
     null;
   if (!audioUrl) {
+    console.log("[music] No results found", {
+      reason: "first hit had no usable audio URL",
+    });
     return null;
   }
   return { audioUrl, track: first };
@@ -235,8 +248,22 @@ function mixBackgroundMusic(inputVideoPath, musicPath, outputPath, finalDuration
 }
 
 function burnCaptions(inputVideoPath, outputPath, clips) {
+  const firstNarration = String(
+    clips.find((c) => String(c?.narration || "").trim())?.narration || "",
+  )
+    .trim()
+    .slice(0, 80);
+  console.log("[captions] Starting caption burn", {
+    clipCount: Array.isArray(clips) ? clips.length : 0,
+    firstNarration,
+  });
+
   const drawtextFilters = buildCaptionDrawtextFilters(clips);
+  console.log("[captions] Built drawtext filters", {
+    filterCount: drawtextFilters.length,
+  });
   if (!drawtextFilters.length) {
+    console.log("[captions] No caption filters, copying video unchanged");
     return fs.copyFile(inputVideoPath, outputPath);
   }
   return new Promise((resolve, reject) => {
@@ -259,8 +286,16 @@ function burnCaptions(inputVideoPath, outputPath, clips) {
         ])
         .output(outputPath),
     )
-      .on("end", () => resolve())
-      .on("error", (err) => reject(err))
+      .on("end", () => {
+        console.log("[captions] Caption burn complete");
+        resolve();
+      })
+      .on("error", (err) => {
+        console.error("[captions] Caption burn FFmpeg error", {
+          message: err?.message,
+        });
+        reject(err);
+      })
       .run();
   });
 }
@@ -600,8 +635,13 @@ app.post("/assemble", async (req, res) => {
     let processedPath = finalPath;
     const pixabayApiKey = cloudinaryConfig?.pixabayApiKey || process.env.PIXABAY_API_KEY;
     if (pixabayApiKey) {
+      const musicQuery = getMusicQueryForNiche(niche);
+      console.log("[music] Starting music search", {
+        niche,
+        query: musicQuery,
+        pixabayApiKey: !!pixabayApiKey,
+      });
       try {
-        const musicQuery = getMusicQueryForNiche(niche);
         const music = await searchPixabayMusicTrack(musicQuery, pixabayApiKey);
         if (music?.audioUrl) {
           const musicPath = path.join(workDir, "bg-music.mp3");
@@ -609,35 +649,37 @@ app.post("/assemble", async (req, res) => {
           await downloadToFile(music.audioUrl, musicPath, "bg-music");
           await mixBackgroundMusic(finalPath, musicPath, withMusicPath, finalDuration);
           processedPath = withMusicPath;
-          console.log("[assembly-server] Background music mixed", {
+          console.log("[music] Background music mixed successfully", {
             videoId,
             musicQuery,
             audioUrl: music.audioUrl?.slice?.(0, 120),
           });
         } else {
-          console.warn("[assembly-server] No Pixabay music results, continuing without music", {
+          console.warn("[music] No music applied, continuing without music", {
             videoId,
             niche,
             musicQuery,
           });
         }
       } catch (musicError) {
-        console.warn("[assembly-server] Music mix failed, continuing without music", {
+        console.warn("[music] Music step failed, continuing without music", {
           videoId,
           niche,
+          query: musicQuery,
           message: musicError instanceof Error ? musicError.message : String(musicError),
         });
       }
     } else {
-      console.warn("[assembly-server] No pixabayApiKey provided, skipping background music");
+      console.warn("[music] No pixabayApiKey provided, skipping background music");
     }
 
     const withCaptionsPath = path.join(workDir, "final-with-captions.mp4");
     try {
       await burnCaptions(processedPath, withCaptionsPath, clips);
       processedPath = withCaptionsPath;
+      console.log("[captions] Captions applied successfully", { videoId });
     } catch (captionError) {
-      console.warn("[assembly-server] Caption burn failed, continuing without captions", {
+      console.warn("[captions] Caption burn failed, continuing without captions", {
         videoId,
         message:
           captionError instanceof Error ? captionError.message : String(captionError),
