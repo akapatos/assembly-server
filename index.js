@@ -673,18 +673,21 @@ app.post("/assemble", async (req, res) => {
       console.warn("[music] No pixabayApiKey provided, skipping background music");
     }
 
-    const withCaptionsPath = path.join(workDir, "final-with-captions.mp4");
-    try {
-      await burnCaptions(processedPath, withCaptionsPath, clips);
-      processedPath = withCaptionsPath;
-      console.log("[captions] Captions applied successfully", { videoId });
-    } catch (captionError) {
-      console.warn("[captions] Caption burn failed, continuing without captions", {
-        videoId,
-        message:
-          captionError instanceof Error ? captionError.message : String(captionError),
-      });
-    }
+    // TEMPORARILY DISABLED: caption burning fails with "Invalid string length".
+    // Re-enable once the drawtext text-length handling is fixed.
+    // const withCaptionsPath = path.join(workDir, "final-with-captions.mp4");
+    // try {
+    //   await burnCaptions(processedPath, withCaptionsPath, clips);
+    //   processedPath = withCaptionsPath;
+    //   console.log("[captions] Captions applied successfully", { videoId });
+    // } catch (captionError) {
+    //   console.warn("[captions] Caption burn failed, continuing without captions", {
+    //     videoId,
+    //     message:
+    //       captionError instanceof Error ? captionError.message : String(captionError),
+    //   });
+    // }
+    console.log("[captions] Caption burning is temporarily disabled", { videoId });
 
     console.log("[assembly-server] Uploading final video", { videoId, finalDuration });
 
