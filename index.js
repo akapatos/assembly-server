@@ -1,24 +1,93 @@
-import cors from "cors";
-import express from "express";
-import ffmpeg from "fluent-ffmpeg";
-import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
-import ffprobeInstaller from "@ffprobe-installer/ffprobe";
-import { v2 as cloudinary } from "cloudinary";
-import fs from "fs/promises";
-import { createWriteStream } from "fs";
-import { pipeline } from "stream/promises";
-import os from "os";
-import path from "path";
-import fetch from "node-fetch";
+console.log("[startup] Loading dependencies");
 
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-ffmpeg.setFfprobePath(ffprobeInstaller.path);
+// Dependencies are loaded dynamically (instead of static imports) so that a
+// failure in any single module is logged with the exact module name, rather
+// than crashing the process before any log can be emitted.
+let cors;
+let express;
+let ffmpeg;
+let ffmpegInstaller;
+let ffprobeInstaller;
+let cloudinary;
+let fs;
+let createWriteStream;
+let pipeline;
+let os;
+let path;
+let fetch;
 
-const app = express();
+try {
+  cors = (await import("cors")).default;
+  console.log("[startup] Loaded cors");
+
+  express = (await import("express")).default;
+  console.log("[startup] Loaded express");
+
+  ffmpeg = (await import("fluent-ffmpeg")).default;
+  console.log("[startup] Loaded fluent-ffmpeg");
+
+  ffmpegInstaller = (await import("@ffmpeg-installer/ffmpeg")).default;
+  console.log("[startup] Loaded ffmpeg installer", {
+    path: ffmpegInstaller?.path,
+  });
+
+  ffprobeInstaller = (await import("@ffprobe-installer/ffprobe")).default;
+  console.log("[startup] Loaded ffprobe installer", {
+    path: ffprobeInstaller?.path,
+  });
+
+  cloudinary = (await import("cloudinary")).v2;
+  console.log("[startup] Loaded cloudinary");
+
+  fs = (await import("fs/promises")).default;
+  console.log("[startup] Loaded fs/promises");
+
+  ({ createWriteStream } = await import("fs"));
+  ({ pipeline } = await import("stream/promises"));
+  os = (await import("os")).default;
+  path = (await import("path")).default;
+  console.log("[startup] Loaded core node modules (fs, stream, os, path)");
+
+  fetch = (await import("node-fetch")).default;
+  console.log("[startup] Loaded node-fetch");
+} catch (err) {
+  console.error(
+    "[startup] FATAL: dependency load failed:",
+    err?.message || err,
+  );
+  console.error(err?.stack);
+  process.exit(1);
+}
+
+console.log("[startup] All dependencies loaded");
+
 const PORT = process.env.PORT || 3001;
+let app;
 
-app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+try {
+  console.log("[startup] Configuring ffmpeg/ffprobe paths");
+  if (!ffmpegInstaller?.path) {
+    throw new Error("ffmpeg installer path is missing");
+  }
+  if (!ffprobeInstaller?.path) {
+    throw new Error("ffprobe installer path is missing");
+  }
+  ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+  ffmpeg.setFfprobePath(ffprobeInstaller.path);
+
+  console.log("[startup] Initializing express app");
+  app = express();
+  app.use(cors());
+  app.use(express.json({ limit: "2mb" }));
+  console.log("[startup] Express app initialized");
+} catch (err) {
+  console.error(
+    "[startup] FATAL: app initialization failed:",
+    err?.message || err,
+  );
+  console.error(err?.stack);
+  process.exit(1);
+}
 
 function getClipDuration(clip) {
   return Number(
@@ -802,13 +871,26 @@ app.post("/assemble", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log("[assembly-server] Listening", {
-    port: PORT,
-    ffmpegPath: ffmpegInstaller.path,
-    ffprobePath: ffprobeInstaller.path,
+console.log("[startup] Starting HTTP server", { port: PORT });
+
+try {
+  const server = app.listen(PORT, () => {
+    console.log("[assembly-server] Listening", {
+      port: PORT,
+      ffmpegPath: ffmpegInstaller.path,
+      ffprobePath: ffprobeInstaller.path,
+    });
+    console.log("[startup] Server started successfully");
   });
-});
+
+  server.on("error", (err) => {
+    console.error("[startup] FATAL: server failed to start:", err?.message || err);
+    console.error(err?.stack);
+  });
+} catch (err) {
+  console.error("[startup] FATAL: app.listen threw:", err?.message || err);
+  console.error(err?.stack);
+}
 
 process.on("uncaughtException", (err) => {
   console.error("[server] Uncaught exception:", err.message);
