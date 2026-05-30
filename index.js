@@ -459,6 +459,75 @@ function runFfmpegSceneMux(
   });
 }
 
+function getImageExtensionFromUrl(url) {
+  try {
+    const { pathname } = new URL(url);
+    const match = pathname.toLowerCase().match(/\.(jpe?g|png|webp)$/);
+    if (match) {
+      return match[0];
+    }
+  } catch {
+    // ignore
+  }
+  return ".jpg";
+}
+
+/**
+ * Build a scene from a STILL IMAGE using a slow Ken Burns zoom, then mux the voiceover.
+ */
+function runKenBurnsImageMux(imagePath, voicePath, outputPath, targetDuration) {
+  return new Promise((resolve, reject) => {
+    const fps = 30;
+    const frames = Math.max(1, Math.round(targetDuration * fps));
+    const kenBurns =
+      `zoompan=z='min(zoom+0.001,1.3)':d=${frames}` +
+      `:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080:fps=${fps},` +
+      "scale=1920:1080:force_original_aspect_ratio=increase," +
+      "crop=1920:1080,format=yuv420p";
+
+    attachFfmpegLogging(
+      ffmpeg()
+        .input(imagePath)
+        .inputOptions(["-loop", "1", "-framerate", String(fps)])
+        .input(voicePath)
+        .videoFilters(kenBurns)
+        .outputOptions([
+          "-map",
+          "0:v:0",
+          "-map",
+          "1:a:0",
+          "-c:v",
+          "libx264",
+          "-crf",
+          "23",
+          "-preset",
+          "fast",
+          "-pix_fmt",
+          "yuv420p",
+          "-r",
+          "30",
+          "-vsync",
+          "cfr",
+          "-c:a",
+          "aac",
+          "-ar",
+          "44100",
+          "-ac",
+          "2",
+          "-t",
+          String(targetDuration),
+          "-shortest",
+          "-movflags",
+          "+faststart",
+        ])
+        .output(outputPath),
+    )
+      .on("end", () => resolve())
+      .on("error", (err) => reject(err))
+      .run();
+  });
+}
+
 async function buildSceneSegment(clip, index, workDir) {
   const targetDuration = Math.max(0.1, getClipDuration(clip));
   const trimStart = Math.max(0, Number(clip.trim_start ?? 0));
@@ -470,6 +539,24 @@ async function buildSceneSegment(clip, index, workDir) {
   }
   if (!clip.voice_url) {
     throw new Error(`Clip ${index} is missing voice_url`);
+  }
+
+  // Ken Burns path: file_url is a still image, not a video.
+  if (clip.needs_ken_burns === true) {
+    const imageExt = getImageExtensionFromUrl(clip.file_url);
+    const imagePath = path.join(workDir, `scene_${index}_image${imageExt}`);
+    await downloadToFile(clip.file_url, imagePath, `image-${index}`);
+    await downloadToFile(clip.voice_url, voicePath, `voice-${index}`);
+
+    console.log("[ken-burns] Building Ken Burns scene from image", {
+      index,
+      duration: targetDuration,
+      source: clip.source,
+      image: clip.file_url?.slice?.(0, 120),
+    });
+
+    await runKenBurnsImageMux(imagePath, voicePath, outputPath, targetDuration);
+    return outputPath;
   }
 
   const stockRawPath = path.join(workDir, `scene_${index}_stock_raw.mp4`);
@@ -590,7 +677,7 @@ async function uploadFinalVideo(filePath, videoId) {
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true });
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
 app.post("/assemble", async (req, res) => {
@@ -617,6 +704,14 @@ app.post("/assemble", async (req, res) => {
     }
 
     configureCloudinary(cloudinaryConfig);
+
+    const openaiApiKey = cloudinaryConfig?.openaiApiKey || process.env.OPENAI_API_KEY;
+    const kenBurnsClipCount = clips.filter((c) => c?.needs_ken_burns === true).length;
+    console.log("[assembly-server] Footage breakdown", {
+      videoId,
+      kenBurnsClipCount,
+      openaiApiKeyAvailable: !!openaiApiKey,
+    });
 
     const segmentPaths = [];
     for (let i = 0; i < clips.length; i++) {
@@ -713,4 +808,12 @@ app.listen(PORT, () => {
     ffmpegPath: ffmpegInstaller.path,
     ffprobePath: ffprobeInstaller.path,
   });
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[server] Uncaught exception:", err.message);
+});
+
+process.on("unhandledRejection", (err) => {
+  console.error("[server] Unhandled rejection:", err?.message || err);
 });
